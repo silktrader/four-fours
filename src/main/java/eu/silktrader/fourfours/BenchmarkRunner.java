@@ -25,6 +25,6 @@ public class BenchmarkRunner {
   @Fork(value = 3, warmups = 1)
   public void benchmarkAll() {
     var solver = new Solver(20);
-    solver.generateAll();
+    solver.solve();
   }
 }

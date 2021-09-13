@@ -5,23 +5,22 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
-// can't finalise class due to benchmark framework
 public final class Solver {
 
   private final HashMap<Integer, Expression> results = new HashMap<>();
 
   private final ConcurrentHashMap<CostResult, IOperand> operands;
 
-  private final AtomicInteger operandCounter = new AtomicInteger(0);
-
   private final List<UnaryOperator> unaryOperators = List.of(
    new UnaryOperator(Math::sqrt, "sqrt", 2)
    );
   private final List<BinaryOperator> binaryOperators = List.of(
-          new BinaryOperator(Double::sum, "+", true),
-          new BinaryOperator((x, y) -> x - y, "-", true),
-          new BinaryOperator((x, y) -> x * y, "*", false),
-          new BinaryOperator((x, y) -> x / y, "/", false));
+          new BinaryOperator(Double::sum, "+", Precedence.LOW, InvertedOperand.NO),
+          new BinaryOperator((x, y) -> x - y, "-", Precedence.LOW, InvertedOperand.NO),
+          new BinaryOperator((x, y) -> y - x, "-", Precedence.LOW, InvertedOperand.YES),
+          new BinaryOperator((x, y) -> x * y, "*", Precedence.HIGH, InvertedOperand.NO),
+          new BinaryOperator((x, y) -> y / x, "/", Precedence.HIGH, InvertedOperand.YES),
+          new BinaryOperator((x, y) -> x / y, "/", Precedence.HIGH, InvertedOperand.NO));
 
   private final int maxCost = 4;
   private final int maxRange;
@@ -33,13 +32,13 @@ public final class Solver {
 
   public static void main(String[] args) {
     var solver = new Solver(101);
-    solver.generateAll();
+    solver.solve();
 
     // separate activities to exclude output from benchmarking
     solver.printAll();
   }
 
-  public ConcurrentHashMap<CostResult, IOperand> buildOperands() {
+  private ConcurrentHashMap<CostResult, IOperand> buildOperands() {
     var operands = new ConcurrentHashMap<CostResult, IOperand>();
     operands.put(new CostResult(1, 4), new IOperand() {
       public int getCost() { return 1; }
@@ -71,10 +70,16 @@ public final class Solver {
       public double getResult() { return 24; }
       public String toString() { return "4!"; }
     });
+    operands.put(new CostResult(1, 4/9.0), new IOperand() {
+      public int getCost() { return 1; }
+      public int getVerboseness() { return 2; }
+      public double getResult() { return 4/9.0; }
+      public String toString() { return "ā"; }
+    });
     return operands;
   }
 
-  public void printAll() {
+  private void printAll() {
     var missing = new AtomicInteger();
     IntStream.range(0, maxRange).forEach(i -> Optional.ofNullable(results.get(i)).ifPresentOrElse(
             expression -> System.out.println(i + ":  " + expression.trimmedString()),
@@ -84,71 +89,87 @@ public final class Solver {
     ));
 
     System.out.println("Missing " + missing.get());
-    System.out.println("Evaluated " + operandCounter + " expressions");
   }
 
-  public void generateAll() {
-    for (var leftOperand : operands.values()) {
-      // expand each operand at least once through unary operators
-      expandOperand(leftOperand);
+  private Collection<IOperand> expand(IOperand operand) {
 
-      // reached max cost stop combining
-      if (leftOperand.getCost() >= maxCost)
-        continue;
+    // unary operators don't increase expressions costs
+    // create an operand when it's missing, update the operand when a less verbose one is found
+    var newOperands = new ArrayList<IOperand>();
+    for (var operator: unaryOperators) {
+      final var result = operator.operate().apply(operand.getResult());
+      final var identifier = new CostResult(operand.getCost(), result);
+      var matchingOperand = operands.get(identifier);
 
-      for (var rightOperand : operands.values()) {
-        // when the combination's cost exceeds the max cost the expression is discarded
-        // early exit prevents new objects generation and operator iteration
+      // the new operand triggers a new value and should be evaluated in future combinations
+      if (matchingOperand == null || matchingOperand.getVerboseness() > operand.getVerboseness()) {
+        final var newOperand = new UnaryExpression(operand, result, operator);
+        operands.put(identifier, newOperand);
+        newOperands.add(newOperand);
+      }
+    }
+    return newOperands;
+  }
+
+  private List<IOperand> combine(Iterable<IOperand> leftOperands, Iterable<IOperand> rightOperands) {
+
+    final var newOperands = new ArrayList<IOperand>();
+
+    for (var leftOperand: leftOperands) {
+      for (var rightOperand: rightOperands) {
+
+        // no matter what the operator is, the final cost exceeds the available budget in digits
         final var cost = leftOperand.getCost() + rightOperand.getCost();
         if (cost > maxCost)
           continue;
 
-        for (var operator : binaryOperators) {
-
+        for (var operator: binaryOperators) {
           // evaluate result and trim unusable ones
-          final var result = operator.compute().apply(leftOperand.getResult(), rightOperand.getResult());
+          final var result = operator.compute(leftOperand, rightOperand);
           if (!Double.isFinite(result))
             continue;
 
           // build an expression with the operands combination and a selected binary operator
           var expression = new BinaryExpression(leftOperand, rightOperand, operator);
 
+          // TK if there's an operand with the same cost and result, but lower verboseness, substitute it
+
           // a valid combination yields an integer
           final var flooredResult = (int) Math.rint(result);
           if (cost == maxCost && Double.compare(flooredResult, result) == 0 && result >= 0) {
             var existingResult = results.get(flooredResult);
-            if (existingResult == null || existingResult.getVerboseness() > expression.getVerboseness()) {
+            if (existingResult == null || existingResult.getVerboseness() > expression.getVerboseness())
               results.put(flooredResult, expression);
-
-              // the low verboseness of the operand is guaranteed by the previous check
-              operands.put(new CostResult(cost, result), expression);
-              operandCounter.incrementAndGet();
-            }
           }
-          // the new expression isn't a result and could be added to the expression
-          updateOperand(cost, result, expression);
+
+          // add the operand, even when the cost amounts to the max — as it can be augmented by unary operators
+          newOperands.add(expression);
         }
       }
     }
+    return newOperands;
   }
 
-  // expand operands through unary operators
-  public void expandOperand(IOperand operand) {
+  public void solve() {
 
-      for (var operator: unaryOperators) {
-        // unary operators don't increase expressions costs
-        // create an operand when it's missing, update the operand when a less verbose one is found
-        final var result = operator.operate().apply(operand.getResult());
-        updateOperand(operand.getCost(), result, new UnaryExpression(operand, result, operator));
-      }
+    // expand initial operands with unary operators
+    final var unaryOperands = new ArrayList<>(operands.values());
+    for (var o: operands.values()) {
+      unaryOperands.addAll(expand(o));
+    }
+
+    // 1 + 1 = 2
+    final var binaryOperands = combine(unaryOperands, unaryOperands);
+
+    // 2 + 1 = 3
+    final var threeOperands = combine(unaryOperands, binaryOperands);
+
+    // 2 + 2 = 4
+    final var fourOperands = combine(binaryOperands, binaryOperands);
+
+    // 3 + 1 = 4
+    // makes sense to stop as each operand's cost is at least one
+    final var finalOperands = combine(unaryOperands, threeOperands);
   }
 
-  public void updateOperand(int cost, double result, IOperand operand) {
-    final var identifier = new CostResult(cost, result);
-    var matchingOperand = operands.get(identifier);
-    if (matchingOperand == null || matchingOperand.getVerboseness() > operand.getVerboseness()) {
-      operands.put(identifier, operand);
-      operandCounter.incrementAndGet();
-      }
-  }
 }

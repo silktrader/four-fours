@@ -12,8 +12,22 @@ public final class BinaryExpression extends Expression {
             BinaryOperator operator
     ) {
         super(leftOperand.getCost() + rightOperand.getCost(), operator
-                .compute()
+                .operation()
                 .apply(leftOperand.getResult(), rightOperand.getResult()), leftOperand.getVerboseness() + rightOperand.getVerboseness());
+
+        this.leftOperand = leftOperand;
+        this.rightOperand = rightOperand;
+        this.operator = operator;
+    }
+
+    public BinaryExpression(
+            IOperand leftOperand,
+            IOperand rightOperand,
+            BinaryOperator operator,
+            int cost,
+            double result
+    ) {
+        super(cost, result, leftOperand.getVerboseness() + rightOperand.getVerboseness());
 
         this.leftOperand = leftOperand;
         this.rightOperand = rightOperand;
@@ -22,8 +36,13 @@ public final class BinaryExpression extends Expression {
 
     @Override
     public String toString() {
-        if (operator.getBrackets())
-            return "(" + leftOperand + operator + rightOperand + ")";
-        return leftOperand.toString() + operator + rightOperand.toString();
+
+        final var base = operator.invertedOperand() == InvertedOperand.YES ?
+                rightOperand.toString() + operator + leftOperand
+                : leftOperand.toString() + operator + rightOperand;
+
+        if (operator.getPrecedence() == Precedence.LOW)
+            return "(" + base + ")";
+        return base;
     }
 }
